@@ -19,9 +19,9 @@ End-to-end declarative Lakehouse pipeline using Delta Live Tables on Azure Datab
 
 ```mermaid
 flowchart LR
-    A[Source<br/>insurance.csv<br/>Unity Catalog Volume] --> B[Bronze<br/>@dlt.table<br/>raw ingestion]
-    B --> C[Silver<br/>@dlt.expect_or_drop<br/>cleansed + validated]
-    C --> D[Gold<br/>dlt.apply_changes<br/>SCD / CDC]
+    A["Source<br>insurance.csv<br>Unity Catalog Volume"] --> B["Bronze<br>@dlt.table<br>raw ingestion"]
+    B --> C["Silver<br>@dlt.expect_or_drop<br>cleansed + validated"]
+    C --> D["Gold<br>dlt.apply_changes<br>SCD / CDC"]
 
     style A fill:#e8e8e8,stroke:#555,color:#000
     style B fill:#cd7f32,stroke:#7a4a1f,color:#fff
