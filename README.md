@@ -1,6 +1,6 @@
 # Insurance DLT Pipeline
 
-> 🚧 **Status: Actively in development — Bronze layer with DLT in progress (May 2026)**
+> 🚧 **Status:** Actively in development — Bronze DLT layer complete (May 2026). Silver and Gold layers in progress.
 
 End-to-end declarative Lakehouse pipeline using Delta Live Tables on Azure Databricks — insurance domain.
 
@@ -61,12 +61,22 @@ writing a driver notebook that calls `read → transform → write` step-by-step
 
 ## Project Status
 
+| Layer  | Status         | Description                                                                                                                                                                                                       | Date     |
+|--------|----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------|
+| Bronze | ✅ Complete     | DLT `@dlt.table` with Auto Loader (`cloudFiles`) ingestion. Three audit columns: `_ingestion_timestamp`, `_source_file` (UC-compliant via `_metadata.file_path`), `_source_system`. Runs as Lakeflow declarative pipeline. | May 2026 |
+| Silver | 🚧 In progress  | Cleansing with `@dlt.expect_or_drop` quality rules.                                                                                                                                                                | —        |
+| Gold   | ⏳ Planned      | CDC via `dlt.apply_changes` (SCD Type 2).                                                                                                                                                                          | —        |
+
+Supporting work:
 - [x] Repo skeleton and project scaffolding
-- [ ] **Bronze layer (in progress)** — raw CSV ingestion via `@dlt.table` from a UC Volume
-- [ ] Silver layer — cleansing with `@dlt.expect_or_drop` quality rules
-- [ ] Gold layer — CDC via `dlt.apply_changes` (SCD Type 2)
 - [ ] Unit tests (`pytest`) for transformation helpers
 - [ ] CI workflow (lint + tests)
+
+---
+
+## Recent updates
+
+- **May 2026:** Completed Bronze DLT layer. Auto Loader ingestion of Kaggle insurance dataset (1,338 rows) into `workspace.default.bronze_insurance_claims` via declarative `@dlt.table`. Pipeline runs green on Databricks Free Edition with serverless compute in 39 seconds end-to-end.
 
 ---
 
@@ -83,6 +93,12 @@ writing a driver notebook that calls `read → transform → write` step-by-step
 ## Related Project
 
 See also: **NYC Taxi Medallion Pipeline** (imperative PySpark) — [github.com/Shishubala-01/nyc-taxi-medallion-pipeline](https://github.com/Shishubala-01/nyc-taxi-medallion-pipeline)
+
+---
+
+## Lessons Learned
+
+- **Unity Catalog migration:** `input_file_name()` is deprecated in UC-governed workspaces. The replacement is `_metadata.file_path`, which is a hidden struct column providing structured access to source-file attributes (path, size, modification time). A small but real migration step when moving from Hive metastore to Unity Catalog.
 
 ---
 
