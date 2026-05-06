@@ -14,7 +14,7 @@ Layer: Bronze
 """
 
 import dlt
-from pyspark.sql.functions import current_timestamp, lit, col
+from pyspark.sql.functions import current_timestamp, lit, col,when
 from pyspark.sql.types import (
     IntegerType, DoubleType, StringType, StructType, StructField
 )
@@ -83,4 +83,65 @@ def bronze_insurance_claims():
             .withColumn("_ingestion_timestamp", current_timestamp())
             .withColumn("_source_file",         col("_metadata.file_path"))
             .withColumn("_source_system",       lit(SOURCE_SYSTEM))
+    )
+
+# ─────────────────────────────────────────────────────────────
+# Silver table — cleansed and enriched insurance claims
+# ─────────────────────────────────────────────────────────────
+# This Silver table demonstrates DLT's three-tier expectations
+# framework — the declarative replacement for the manual
+# quarantine pattern from Project 1.
+#
+# Five expectations spanning all three severity tiers:
+#   - 1 warn   (@dlt.expect)         — track but don't filter
+#   - 3 drop   (@dlt.expect_or_drop) — filter out clearly bad data
+#   - 1 fail   (@dlt.expect_or_fail) — abort if critical violation
+#
+# Light enrichment: derived risk_band column from age + smoker.
+# Audit metadata: _silver_processed_timestamp.
+#
+# Note: Plain @dlt.expect tracks counts only — failed rows pass
+# through to the output. To see WHICH rows failed a warn rule,
+# you'd add a parallel @dlt.view (production pattern, omitted
+# here for clarity).
+# ─────────────────────────────────────────────────────────────
+
+@dlt.table(
+    name="silver_insurance_claims",
+    comment=(
+        "Silver layer: cleansed and enriched insurance claims. "
+        "Applies five DLT expectations across warn, drop, and fail tiers. "
+        "Adds risk_band enrichment derived from age + smoker."
+    ),
+    table_properties={
+        "quality": "silver",
+        "pipelines.autoOptimize.managed": "true",
+    },
+)
+# Tier 1: warn — track but don't filter (BMI > 50 is unusual but possible)
+@dlt.expect("plausible_bmi", "bmi BETWEEN 10 AND 60")
+
+# Tier 2: drop — clearly invalid, filter out
+@dlt.expect_or_drop("non_negative_charges",  "charges >= 0")
+@dlt.expect_or_drop("valid_age",             "age >= 0 AND age <= 120")
+@dlt.expect_or_drop("valid_children_count",  "children >= 0 AND children <= 10")
+
+# Tier 3: fail — critical invariant; if violated, source is broken
+@dlt.expect_or_fail("region_present", "region IS NOT NULL AND region <> ''")
+def silver_insurance_claims():
+    """
+    Reads Bronze, applies expectations, adds risk_band enrichment,
+    adds Silver audit metadata, returns a clean Silver DataFrame.
+    """
+    return (
+        dlt.read_stream("bronze_insurance_claims")
+        # Light enrichment — derive a risk_band column for downstream analytics
+        .withColumn(
+            "risk_band",
+            when((col("age") >= 60) & (col("smoker") == "yes"), lit("high"))
+            .when((col("age") >= 60) | (col("smoker") == "yes"), lit("medium"))
+            .otherwise(lit("low"))
+        )
+        # Silver audit metadata — when this row was processed by Silver
+        .withColumn("_silver_processed_timestamp", current_timestamp())
     )
