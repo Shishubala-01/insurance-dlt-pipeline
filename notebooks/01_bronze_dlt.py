@@ -14,7 +14,7 @@ Layer: Bronze
 """
 
 import dlt
-from pyspark.sql.functions import current_timestamp, lit, col,when
+from pyspark.sql.functions import current_timestamp, lit, col,when,expr
 from pyspark.sql.types import (
     IntegerType, DoubleType, StringType, StructType, StructField
 )
@@ -145,3 +145,140 @@ def silver_insurance_claims():
         # Silver audit metadata — when this row was processed by Silver
         .withColumn("_silver_processed_timestamp", current_timestamp())
     )
+
+# ─────────────────────────────────────────────────────────────
+# CDC PIPELINE — Bronze → Silver → Gold (Type 1 + Type 2)
+# ─────────────────────────────────────────────────────────────
+# This second flow demonstrates DLT's apply_changes for CDC.
+# It runs in the same pipeline as the main insurance flow above
+# but ingests a separate synthetic CDC dataset and produces
+# two Gold tables side-by-side: SCD Type 1 (current state only)
+# and SCD Type 2 (full history with __START_AT/__END_AT).
+#
+# Note: The CDC dataset is synthetic for demonstration purposes.
+# In production, change events would come from a CDC tool like
+# Debezium, AWS DMS, or Oracle GoldenGate.
+# ─────────────────────────────────────────────────────────────
+
+CDC_SOURCE_PATH = "/Volumes/workspace/default/insurance_landing/cdc_events/"
+
+# Schema for the CDC events
+CDC_SCHEMA = StructType([
+    StructField("customer_id",        IntegerType(),   nullable=False),
+    StructField("age",                IntegerType(),   nullable=True),
+    StructField("sex",                StringType(),    nullable=True),
+    StructField("bmi",                DoubleType(),    nullable=True),
+    StructField("children",           IntegerType(),   nullable=True),
+    StructField("smoker",             StringType(),    nullable=True),
+    StructField("region",             StringType(),    nullable=True),
+    StructField("charges",            DoubleType(),    nullable=True),
+    StructField("_change_timestamp",  StringType(),    nullable=False),  # CSV → string, cast in Silver
+    StructField("operation",          StringType(),    nullable=False),
+])
+
+
+# ─────────────────────────────────────────────────────────────
+# Bronze: ingest CDC events via Auto Loader
+# ─────────────────────────────────────────────────────────────
+
+@dlt.table(
+    name="bronze_customer_changes",
+    comment=(
+        "Bronze layer for CDC: raw customer change events from synthetic CDC source. "
+        "Each row represents an INSERT or UPDATE operation at a specific point in time."
+    ),
+    table_properties={"quality": "bronze"},
+)
+def bronze_customer_changes():
+    """Reads synthetic CDC events from the volume using Auto Loader."""
+    return (
+        spark.readStream
+            .format("cloudFiles")
+            .option("cloudFiles.format", "csv")
+            .option("cloudFiles.schemaLocation",
+                    "/Volumes/workspace/default/insurance_landing/_checkpoints/bronze_cdc")
+            .option("header", "true")
+            .schema(CDC_SCHEMA)
+            .load(CDC_SOURCE_PATH)
+            .withColumn("_ingestion_timestamp", current_timestamp())
+            .withColumn("_source_file",         col("_metadata.file_path"))
+            .withColumn("_source_system",       lit("synthetic_cdc_v1"))
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Silver: cast timestamp + light quality
+# ─────────────────────────────────────────────────────────────
+
+@dlt.table(
+    name="silver_customer_changes",
+    comment=(
+        "Silver layer for CDC: typed and validated change events. "
+        "Cast _change_timestamp from string to timestamp for use in apply_changes."
+    ),
+    table_properties={"quality": "silver"},
+)
+@dlt.expect_or_drop("non_null_customer_id", "customer_id IS NOT NULL")
+@dlt.expect_or_drop("valid_operation",      "operation IN ('INSERT', 'UPDATE', 'DELETE')")
+def silver_customer_changes():
+    """Casts _change_timestamp to a real timestamp type so apply_changes can sequence by it."""
+    return (
+        dlt.read_stream("bronze_customer_changes")
+        .withColumn("_change_timestamp", col("_change_timestamp").cast("timestamp"))
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Gold: SCD Type 1 — current state only
+# ─────────────────────────────────────────────────────────────
+# apply_changes is a 2-step pattern in DLT:
+#   1. Declare an empty target table with @dlt.table
+#   2. Call dlt.apply_changes() to populate it via CDC logic
+#
+# DLT figures out inserts vs updates from the source events and
+# applies them in sequence_by order, so out-of-order arrivals
+# don't corrupt the final state.
+# ─────────────────────────────────────────────────────────────
+
+dlt.create_streaming_table(
+    name="gold_customer_current",
+    comment=(
+        "Gold SCD Type 1: latest state per customer. "
+        "Current values for each customer_id, with old values overwritten on each change. "
+        "Use case: real-time dashboards, current premium pricing."
+    ),
+    table_properties={"quality": "gold"},
+)
+
+dlt.apply_changes(
+    target            = "gold_customer_current",
+    source            = "silver_customer_changes",
+    keys              = ["customer_id"],
+    sequence_by       = col("_change_timestamp"),
+    stored_as_scd_type = 1,
+    except_column_list = ["operation", "_ingestion_timestamp", "_source_file", "_source_system"],
+)
+
+
+# ─────────────────────────────────────────────────────────────
+# Gold: SCD Type 2 — full history with __START_AT / __END_AT
+# ─────────────────────────────────────────────────────────────
+
+dlt.create_streaming_table(
+    name="gold_customer_history",
+    comment=(
+        "Gold SCD Type 2: full change history per customer with validity windows. "
+        "__START_AT and __END_AT columns auto-generated by DLT. "
+        "Use case: audit, regulatory compliance, point-in-time queries, claim trend analysis."
+    ),
+    table_properties={"quality": "gold"},
+)
+
+dlt.apply_changes(
+    target            = "gold_customer_history",
+    source            = "silver_customer_changes",
+    keys              = ["customer_id"],
+    sequence_by       = col("_change_timestamp"),
+    stored_as_scd_type = 2,
+    except_column_list = ["operation", "_ingestion_timestamp", "_source_file", "_source_system"],
+)
